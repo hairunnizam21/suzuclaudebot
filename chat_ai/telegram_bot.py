@@ -54,6 +54,7 @@ from typing import Any, Callable, Iterable, Optional
 from .api import APIError, ChatClient
 from .config import Config
 from .context import strip_hallucinated_protocols
+from .memory import MemoryStore
 from .prompts import render_system_prompt
 from .runner import run_turn, summarize_tool_output
 from .models_registry import ModelProfile, ModelRegistry
@@ -837,6 +838,7 @@ class Bot:
         # Cache one ChatClient per (base_url, api_key) so switching models is
         # cheap and connection settings are reused.
         self._clients: dict[tuple[str, str], ChatClient] = {}
+        self.memory = MemoryStore(cfg.memory_dir, max_notes=cfg.memory_max_notes)
         self.workers = ChatWorkers()
         # Files a user uploaded but hasn't yet told us what to do with. Keyed by
         # chat id; the per-chat worker is the only writer/reader, so no lock.
@@ -967,7 +969,7 @@ class Bot:
         # Make sure we have a session before downloading anything, so files
         # land inside the workspace.
         session = self.binding.session_for(chat_id, model=self.cfg.default_model)
-        self._ensure_system_prompt(session)
+        self._ensure_system_prompt(session, chat_id)
 
         downloaded: list[Path] = []
         dl_errors: list[str] = []
@@ -1104,7 +1106,7 @@ class Bot:
             except TelegramError:
                 pass
         session = self.binding.session_for(chat_id, model=self.cfg.default_model)
-        self._ensure_system_prompt(session)
+        self._ensure_system_prompt(session, chat_id)
         note = ""
         if files:
             note = "\n\n" + "\n".join(f"Fail APK: {f}" for f in files)
@@ -1146,6 +1148,15 @@ class Bot:
             return True
         if head == "/model":
             self._cmd_model(chat_id, rest)
+            return True
+        if head == "/ingat":
+            self._cmd_ingat(chat_id, rest)
+            return True
+        if head == "/memori":
+            self._cmd_memori(chat_id)
+            return True
+        if head in ("/lupakan", "/lupa"):
+            self._cmd_lupakan(chat_id, rest)
             return True
         if head == "/whoami":
             uid = sender.get("id")
@@ -1212,6 +1223,9 @@ class Bot:
             "  /workspace — print path workspace\n"
             "  /models — senarai model, pilih dgn butang\n"
             "  /model NAME — tukar model terus\n"
+            "  /ingat <nota> — simpan ke memori jangka panjang\n"
+            "  /memori — lihat semua nota memori\n"
+            "  /lupakan N — padam nota #N (atau 'semua')\n"
             "  /whoami — Telegram id awak"
         )
         if is_admin:
@@ -1288,7 +1302,7 @@ class Bot:
         session.title = f"Telegram chat {chat_id}"
         session.save(self.cfg.sessions_dir)
         self.binding.rebind(chat_id, session)
-        self._ensure_system_prompt(session)
+        self._ensure_system_prompt(session, chat_id)
         self.api.send_message(
             chat_id,
             f"🆕 Session baru: `{session.id}`\nWorkspace: `{session.workspace}`",
@@ -1330,6 +1344,46 @@ class Bot:
             chat_id,
             "🧹 History dikosongkan. Hantar task baru — fresh slate.",
         )
+
+    # -- memory commands ---------------------------------------------------- #
+
+    def _cmd_ingat(self, chat_id: int, rest: str) -> None:
+        if not rest:
+            self.api.send_message(chat_id, "Guna: `/ingat <nota>` — simpan ke memori jangka panjang.", parse_mode="Markdown")
+            return
+        count = self.memory.add(chat_id, rest, source="user")
+        self.api.send_message(chat_id, f"🧠 Disimpan ({count} nota keseluruhan).")
+
+    def _cmd_memori(self, chat_id: int) -> None:
+        notes = self.memory.list_notes(chat_id)
+        if not notes:
+            self.api.send_message(chat_id, "Tiada memori lagi. Guna `/ingat <nota>` untuk simpan.", parse_mode="Markdown")
+            return
+        lines = ["🧠 *Memori jangka panjang:*\n"]
+        for i, n in enumerate(notes):
+            src = "🤖" if n.get("source") == "ai" else "👤"
+            lines.append(f"{i+1}. {src} {n['text']}")
+        lines.append(f"\n_Jumlah: {len(notes)} nota_")
+        lines.append("Padam: `/lupakan N` atau `/lupakan semua`")
+        self.api.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
+
+    def _cmd_lupakan(self, chat_id: int, rest: str) -> None:
+        if not rest:
+            self.api.send_message(chat_id, "Guna: `/lupakan N` (padam nota #N) atau `/lupakan semua`", parse_mode="Markdown")
+            return
+        if rest.lower() in ("semua", "all"):
+            removed = self.memory.clear(chat_id)
+            self.api.send_message(chat_id, f"🗑️ {removed} nota dipadam.")
+            return
+        try:
+            idx = int(rest) - 1
+        except ValueError:
+            self.api.send_message(chat_id, "Guna nombor, cth: `/lupakan 3`", parse_mode="Markdown")
+            return
+        if self.memory.remove(chat_id, idx):
+            self.api.send_message(chat_id, f"🗑️ Nota #{idx+1} dipadam.")
+        else:
+            self.api.send_message(chat_id, f"❌ Nota #{idx+1} tak wujud. Guna `/memori` untuk lihat senarai.", parse_mode="Markdown")
 
     def _cmd_model(self, chat_id: int, rest: str) -> None:
         session = self.binding.session_for(chat_id, model=self.cfg.default_model)
@@ -1651,8 +1705,9 @@ class Bot:
 
     # -- session helpers --------------------------------------------------- #
 
-    def _ensure_system_prompt(self, session: Session) -> None:
-        prompt = render_system_prompt(session.workspace, session.model)
+    def _ensure_system_prompt(self, session: Session, chat_id: int = 0) -> None:
+        mem_block = self.memory.render_block(chat_id) if chat_id else ""
+        prompt = render_system_prompt(session.workspace, session.model, mem_block)
         dirty = False
         # Auto-heal: drop assistant messages echoing known hallucinated
         # "protocols" (e.g. "Protokol chunked write"). Targeted to specific
@@ -1872,7 +1927,12 @@ class Bot:
             elif kind == "error":
                 render("Ralat", payload.get("error", "error"), force=True)
 
-        ctx = ToolContext(workspace=Path(session.workspace), debug=self.cfg.debug)
+        ctx = ToolContext(
+            workspace=Path(session.workspace),
+            debug=self.cfg.debug,
+            memory_store=self.memory,
+            chat_id=chat_id,
+        )
         with TypingPing(self.api, chat_id):
             try:
                 final_text = run_turn(

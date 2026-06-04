@@ -43,6 +43,9 @@ class ToolContext:
     # the final signed APK).  Front-ends (the Telegram bot) read this after a
     # turn and upload *only* these, instead of echoing every intermediate file.
     deliverables: list[str] = field(default_factory=list)
+    # Long-term memory store + chat_id for the `remember` tool.
+    memory_store: Any = None
+    chat_id: int = 0
 
 
 class ToolRegistry:
@@ -124,6 +127,17 @@ def _deliver(args: dict[str, Any], ctx: "ToolContext") -> dict[str, Any]:
     }
 
 
+def _remember(args: dict[str, Any], ctx: "ToolContext") -> dict[str, Any]:
+    """Save a note to the user's long-term memory (persists across sessions)."""
+    text = (args.get("note") or "").strip()
+    if not text:
+        return {"error": "`note` is required"}
+    if ctx.memory_store is None or ctx.chat_id == 0:
+        return {"error": "memory not available"}
+    count = ctx.memory_store.add(ctx.chat_id, text, source="ai")
+    return {"saved": True, "total_notes": count}
+
+
 def build_default_registry() -> ToolRegistry:
     reg = ToolRegistry()
     shell.register(reg, Tool)
@@ -156,6 +170,28 @@ def build_default_registry() -> ToolRegistry:
                 "required": ["path"],
             },
             handler=_deliver,
+        )
+    )
+    reg.register(
+        Tool(
+            name="remember",
+            description=(
+                "Save an important note to the user's LONG-TERM memory. "
+                "These notes persist across sessions and are always visible to you. "
+                "Use this to record: project names, package IDs, common errors and "
+                "their fixes, user preferences, or key decisions. Keep notes concise."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "note": {
+                        "type": "string",
+                        "description": "The note to remember (concise, factual).",
+                    },
+                },
+                "required": ["note"],
+            },
+            handler=_remember,
         )
     )
     return reg

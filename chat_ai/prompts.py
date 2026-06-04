@@ -92,5 +92,8 @@ Then wait for the next instruction.
 """
 
 
-def render_system_prompt(workspace: str, model: str) -> str:
-    return SYSTEM_PROMPT.format(workspace=workspace).strip() + f"\n\nCurrent model: {model}."
+def render_system_prompt(workspace: str, model: str, memory_block: str = "") -> str:
+    base = SYSTEM_PROMPT.format(workspace=workspace).strip() + f"\n\nCurrent model: {model}."
+    if memory_block:
+        base += "\n" + memory_block
+    return base

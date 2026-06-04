@@ -26,6 +26,8 @@ class Config:
     sessions_dir: Path
     workspaces_dir: Path
     log_dir: Path
+    memory_dir: Path
+    memory_max_notes: int
     request_timeout: float
     max_tool_iters: int
     auto_continue_rounds: int
@@ -47,7 +49,9 @@ class Config:
         workspaces = base / "workspaces"
         logs = base / "logs"
 
-        for d in (sessions, workspaces, logs):
+        memory = base / "memory"
+
+        for d in (sessions, workspaces, logs, memory):
             try:
                 d.mkdir(parents=True, exist_ok=True)
             except PermissionError:
@@ -56,7 +60,8 @@ class Config:
                 sessions = base / "sessions"
                 workspaces = base / "workspaces"
                 logs = base / "logs"
-                for dd in (sessions, workspaces, logs):
+                memory = base / "memory"
+                for dd in (sessions, workspaces, logs, memory):
                     dd.mkdir(parents=True, exist_ok=True)
                 break
 
@@ -68,6 +73,8 @@ class Config:
             sessions_dir=sessions,
             workspaces_dir=workspaces,
             log_dir=logs,
+            memory_dir=memory,
+            memory_max_notes=int(_env("SUZU_MEMORY_MAX_NOTES", "50")),
             request_timeout=float(_env("SUZU_REQUEST_TIMEOUT", "600")),
             max_tool_iters=int(_env("SUZU_MAX_TOOL_ITERS", "60")),
             # When the model is still working at the iteration cap, auto-nudge it
