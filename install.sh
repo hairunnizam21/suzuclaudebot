@@ -58,23 +58,59 @@ apt_install() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
 }
 
+# Install a batch of apt packages resiliently: try them all at once (fast), but
+# if that fails (one bad/unavailable name aborts the whole apt-get), fall back
+# to installing them one-by-one so a single missing package never blocks the
+# rest. Returns the list of packages that still could not be installed.
+apt_install_each() {
+  local failed=""
+  if apt_install "$@" 2>/dev/null; then
+    return 0
+  fi
+  local p
+  for p in "$@"; do
+    apt_install "$p" 2>/dev/null || failed="$failed $p"
+  done
+  [ -z "$failed" ] && return 0
+  printf '%s\n' "${failed# }"
+  return 1
+}
+
+c_bld "==> Enabling 'universe' repo (apktool/aapt/aapt2/apksigner live there)"
+# apktool, aapt, aapt2, apksigner, zipalign are in the Ubuntu 'universe'
+# component. On minimal images universe is disabled, which is the #1 cause of a
+# whole-batch apt failure that silently skips JDK/aapt. Enable it best-effort.
+if ! grep -rhq '^[^#].*universe' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+  if command -v add-apt-repository >/dev/null 2>&1; then
+    add-apt-repository -y universe >/dev/null 2>&1 || c_yel "  could not auto-enable universe"
+  else
+    apt_install software-properties-common 2>/dev/null \
+      && add-apt-repository -y universe >/dev/null 2>&1 || c_yel "  could not auto-enable universe"
+  fi
+fi
+
 c_bld "==> Updating APT"
-DEBIAN_FRONTEND=noninteractive apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get update -qq || c_yel "  apt-get update reported errors (continuing)"
 
 c_bld "==> Installing system packages"
-CORE_PKGS="ca-certificates curl gnupg git \
-  openjdk-17-jre-headless apktool zipalign apksigner unzip zip sqlite3 \
-  build-essential whiptail file binutils \
-  python3 python3-venv python3-pip"
-# APK reverse-engineering extras. Best-effort via apt: a missing package
-# falls back to manual install from upstream releases below.
-RE_PKGS="aapt aapt2"
-apt_install $CORE_PKGS
-for p in $RE_PKGS; do
-  if ! apt_install "$p" 2>/dev/null; then
-    c_yel "  optional package not available: $p (skipping)"
-  fi
-done
+# Critical packages: the install is not usable without these. Each is installed
+# with per-package fallback; if any remain missing we abort with a clear error.
+CRITICAL_PKGS="ca-certificates curl gnupg git unzip zip \
+  openjdk-17-jre-headless python3 python3-venv python3-pip"
+# Optional/RE packages: nice to have, but missing ones are healed later or are
+# non-fatal (e.g. apt's old apktool is replaced by the upstream jar below).
+OPTIONAL_PKGS="apktool zipalign apksigner aapt aapt2 \
+  build-essential whiptail file binutils sqlite3"
+
+crit_failed="$(apt_install_each $CRITICAL_PKGS)" || true
+if [ -n "$crit_failed" ]; then
+  c_yel "  retrying critical packages after apt-get update…"
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+  crit_failed="$(apt_install_each $crit_failed)" || true
+fi
+
+opt_failed="$(apt_install_each $OPTIONAL_PKGS)" || true
+[ -n "$opt_failed" ] && c_yel "  optional packages not available via apt (will heal/skip):$opt_failed"
 
 # nginx/certbot only needed if we still ship the legacy web frontend.
 if [ "$INSTALL_WEB" = "1" ]; then
@@ -207,13 +243,42 @@ EOF
   c_grn "  smali    -> $(smali --version 2>&1 | head -1)"
 }
 
+install_aapt2_fallback() {
+  # aapt2 normally comes from apt (universe). On images where it's unavailable,
+  # grab the prebuilt Linux binary from Google's maven repo (shipped inside a
+  # jar). apktool 3.x also bundles its own aapt2, so recompile works regardless;
+  # this just makes a standalone `aapt2` available too.
+  if command -v aapt2 >/dev/null 2>&1; then
+    c_yel "  aapt2 already installed: $(command -v aapt2)"
+    return 0
+  fi
+  c_bld "==> Installing aapt2 (Google maven prebuilt)"
+  local ver url
+  ver="${SUZU_AAPT2_VER:-8.5.0-11315950}"
+  url="https://dl.google.com/android/maven2/com/android/tools/build/aapt2/${ver}/aapt2-${ver}-linux.jar"
+  mkdir -p "$TOOLS_DIR/aapt2"
+  if curl -fsSL -o "$TOOLS_DIR/aapt2/aapt2.jar" "$url"; then
+    ( cd "$TOOLS_DIR/aapt2" && unzip -o -q aapt2.jar aapt2 2>/dev/null ) || true
+    if [ -f "$TOOLS_DIR/aapt2/aapt2" ]; then
+      chmod +x "$TOOLS_DIR/aapt2/aapt2"
+      ln -sf "$TOOLS_DIR/aapt2/aapt2" /usr/local/bin/aapt2
+      hash -r
+      c_grn "  aapt2 -> $(aapt2 version 2>&1 | head -1)"
+      return 0
+    fi
+  fi
+  c_yel "  aapt2 fetch failed — apktool 3.x bundles its own, so recompile still works."
+  return 1
+}
+
 # These upstream fetches are best-effort: a transient GitHub API rate-limit or
 # network blip must not abort the whole install (set -e). Guarding each call
 # with `|| ...` disables errexit for the function body, so a failure just warns.
-install_apktool || c_yel "  apktool upgrade skipped (non-fatal)"
-install_jadx    || c_yel "  jadx install skipped (non-fatal)"
-install_dex2jar || c_yel "  dex2jar install skipped (non-fatal)"
-install_smali   || c_yel "  smali install skipped (non-fatal)"
+install_apktool         || c_yel "  apktool upgrade skipped (non-fatal)"
+install_jadx            || c_yel "  jadx install skipped (non-fatal)"
+install_dex2jar         || c_yel "  dex2jar install skipped (non-fatal)"
+install_smali           || c_yel "  smali install skipped (non-fatal)"
+install_aapt2_fallback  || c_yel "  aapt2 fallback skipped (non-fatal)"
 
 if [ "$INSTALL_WEB" = "1" ]; then
   if ! command -v node >/dev/null 2>&1 || [ "$(node -v | sed 's/v//;s/\..*//')" -lt "$NODE_MAJOR" ]; then
@@ -456,6 +521,56 @@ case "\$-" in
 esac
 EOH
 chmod +x "$BASHRC_HOOK_FILE"
+
+# -----------------------------------------------------------------------------
+# Final toolchain verification + self-heal. This is the all-in-one safety net:
+# every tool is checked; missing ones are re-installed once; a clear ✅/❌ summary
+# is printed. If a CRITICAL tool is still missing the installer exits non-zero so
+# failures are loud instead of silent.
+# -----------------------------------------------------------------------------
+hash -r
+heal_tool() {
+  case "$1" in
+    java|keytool)   apt_install default-jre-headless 2>/dev/null || apt_install openjdk-17-jre-headless 2>/dev/null || true ;;
+    apktool)        install_apktool || true ;;
+    jadx)           install_jadx || true ;;
+    d2j-dex2jar)    install_dex2jar || true ;;
+    baksmali|smali) install_smali || true ;;
+    aapt2)          install_aapt2_fallback || true ;;
+    aapt)           apt_install aapt 2>/dev/null || true ;;
+    zipalign)       apt_install zipalign 2>/dev/null || true ;;
+    apksigner)      apt_install apksigner 2>/dev/null || true ;;
+    unzip|zip|git|curl|python3) apt_install "$1" 2>/dev/null || true ;;
+  esac
+  hash -r
+}
+
+CRITICAL_TOOLS="java keytool python3 git curl unzip apktool"
+IMPORTANT_TOOLS="aapt aapt2 zipalign apksigner jadx d2j-dex2jar baksmali smali zip"
+
+c_bld "==> Verifying toolchain"
+missing_critical=""
+missing_important=""
+for t in $CRITICAL_TOOLS $IMPORTANT_TOOLS; do
+  command -v "$t" >/dev/null 2>&1 || heal_tool "$t"
+done
+for t in $CRITICAL_TOOLS; do
+  if command -v "$t" >/dev/null 2>&1; then c_grn  "  [OK]      $t"; else c_red "  [MISSING] $t"; missing_critical="$missing_critical $t"; fi
+done
+for t in $IMPORTANT_TOOLS; do
+  if command -v "$t" >/dev/null 2>&1; then c_grn  "  [OK]      $t"; else c_yel "  [MISSING] $t"; missing_important="$missing_important $t"; fi
+done
+
+if [ -n "$missing_important" ]; then
+  c_yel "==> Optional tools still missing:$missing_important"
+  c_yel "    (apktool 3.x bundles aapt2; signing needs zipalign+apksigner from apt)"
+fi
+if [ -n "$missing_critical" ]; then
+  c_red "==> CRITICAL tools missing:$missing_critical"
+  c_red "    Install aborted as incomplete. Fix the above (check network / 'apt-get update') and re-run install.sh."
+  exit 1
+fi
+c_grn "==> Toolchain OK (all critical tools present)."
 
 c_grn "==> Done."
 if [ "$INSTALL_WEB" = "1" ]; then
