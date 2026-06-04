@@ -28,6 +28,7 @@ class Config:
     log_dir: Path
     request_timeout: float
     max_tool_iters: int
+    auto_continue_rounds: int
     show_tool_io: bool
     auto_approve_shell: bool
     debug: bool
@@ -67,8 +68,12 @@ class Config:
             sessions_dir=sessions,
             workspaces_dir=workspaces,
             log_dir=logs,
-            request_timeout=float(_env("SUZU_REQUEST_TIMEOUT", "300")),
-            max_tool_iters=int(_env("SUZU_MAX_TOOL_ITERS", "40")),
+            request_timeout=float(_env("SUZU_REQUEST_TIMEOUT", "600")),
+            max_tool_iters=int(_env("SUZU_MAX_TOOL_ITERS", "60")),
+            # When the model is still working at the iteration cap, auto-nudge it
+            # to continue this many extra rounds so long APK pipelines finish
+            # without the user having to type "continue".
+            auto_continue_rounds=int(_env("SUZU_AUTO_CONTINUE_ROUNDS", "2")),
             show_tool_io=_env("SUZU_SHOW_TOOL_IO", "1") not in ("0", "false", "False"),
             auto_approve_shell=_env("SUZU_AUTO_APPROVE_SHELL", "1") not in ("0", "false", "False"),
             debug=_env("SUZU_DEBUG", "0") not in ("0", "false", "False"),

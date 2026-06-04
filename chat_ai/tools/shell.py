@@ -8,6 +8,13 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+# Default timeout for ad-hoc shell/exec commands. apktool / gradle / flutter
+# builds (especially the first run that downloads dependencies) routinely take
+# several minutes, so 180s was killing real builds half-way. Configurable via
+# SUZU_SHELL_TIMEOUT. The dedicated apk_* / build_project tools use their own
+# longer timeouts.
+_DEFAULT_SHELL_TIMEOUT = float(os.environ.get("SUZU_SHELL_TIMEOUT", "600"))
+
 
 def _resolve_cwd(cwd: str | None, workspace: str) -> str:
     if not cwd:
@@ -24,7 +31,7 @@ def _run_shell(args: dict[str, Any], ctx) -> dict[str, Any]:
     if not command or not isinstance(command, str):
         return {"error": "`command` (string) is required"}
     cwd = _resolve_cwd(args.get("cwd"), ctx.workspace)
-    timeout = float(args.get("timeout", 180))
+    timeout = float(args.get("timeout") or _DEFAULT_SHELL_TIMEOUT)
     env = os.environ.copy()
     if isinstance(args.get("env"), dict):
         for k, v in args["env"].items():
@@ -67,7 +74,7 @@ def _run_argv(args: dict[str, Any], ctx) -> dict[str, Any]:
         return {"error": "`argv` (list[str]) is required"}
     argv = [str(x) for x in argv]
     cwd = _resolve_cwd(args.get("cwd"), ctx.workspace)
-    timeout = float(args.get("timeout", 180))
+    timeout = float(args.get("timeout") or _DEFAULT_SHELL_TIMEOUT)
     try:
         proc = subprocess.run(
             argv, cwd=cwd, capture_output=True, text=True, timeout=timeout
@@ -109,7 +116,7 @@ def register(reg, Tool) -> None:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default 180).",
+                        "description": "Timeout in seconds (default 600). Pass a larger value for slow gradle/flutter builds.",
                     },
                     "env": {
                         "type": "object",

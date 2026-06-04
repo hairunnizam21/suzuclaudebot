@@ -121,6 +121,50 @@ def _phase_label(tool_name: str) -> str:
     return f"Menjalankan {tool_name}"
 
 
+# Ordered APK pipeline stages used to render a real % progress bar in the live
+# status card. We track the *furthest* stage reached (monotonic) so the bar only
+# ever moves forward, giving the user a meaningful sense of progress.
+_PIPELINE_STAGES: list[tuple[str, tuple[str, ...]]] = [
+    ("Analisa", ("detect_apk_type", "detect_project", "apk_aapt_dump")),
+    ("Decompile", ("apk_decompile", "jadx_decompile", "dex2jar", "smali_disasm")),
+    ("Patch", ("edit_file", "write_file", "smali_asm")),
+    ("Build", ("apk_recompile", "build_project", "apk_build_full")),
+    ("Zipalign", ("apk_zipalign",)),
+    ("Sign", ("apk_sign",)),
+    ("Verify", ("apk_verify_signature",)),
+    ("Deliver", ("deliver",)),
+]
+
+
+def _stage_index(tool_name: str) -> int:
+    """Map a tool name to its APK-pipeline stage index, or -1 if not part of
+    the pipeline (e.g. plain chat / inspection tools)."""
+    name = tool_name or ""
+    for i, (_, tools) in enumerate(_PIPELINE_STAGES):
+        if name in tools:
+            return i
+    n = name.lower()
+    if "decompile" in n:
+        return 1
+    if "recompile" in n or "build" in n or "compile" in n:
+        return 3
+    if "align" in n:
+        return 4
+    if "sign" in n:
+        return 5
+    if "verify" in n:
+        return 6
+    if "deliver" in n:
+        return 7
+    return -1
+
+
+def _progress_bar(pct: int, width: int = 12) -> str:
+    pct = max(0, min(100, pct))
+    fill = int(round(pct / 100 * width))
+    return "█" * fill + "░" * (width - fill)
+
+
 # --------------------------------------------------------------------------- #
 # Telegram Bot API client (stdlib only)
 # --------------------------------------------------------------------------- #
@@ -975,10 +1019,25 @@ class Bot:
             self._ask_apk_intent(chat_id, apk_uploads, reply_to=msg.get("message_id"))
             return
 
+        # Images (screenshots of errors/UI/code) are sent to the model as vision
+        # input so it can actually read them. A bare photo with no caption still
+        # gets analysed (default ask: "what's in this image / the problem?").
+        image_uploads = [p for p in downloaded if p.suffix.lower() in _IMAGE_EXTS]
+        if image_uploads and not user_instruction:
+            text = (
+                "Tolong analisa imej yang saya hantar ni (cth screenshot error / "
+                "UI / kod). Terangkan isinya dan kalau ada masalah/error, "
+                "cadangkan cara betulkan."
+            )
+
         if not text:
             return
 
-        self._route_to_agent(chat_id, session, text, reply_to=msg.get("message_id"))
+        self._route_to_agent(
+            chat_id, session, text,
+            reply_to=msg.get("message_id"),
+            images=image_uploads or None,
+        )
 
     def _ask_apk_intent(
         self, chat_id: int, apks: list[Path], *, reply_to: Optional[int] = None
@@ -1729,6 +1788,7 @@ class Bot:
         text: str,
         *,
         reply_to: Optional[int] = None,
+        images: Optional[list[Path]] = None,
     ) -> None:
         # Resolve which model/provider this chat should use right now. Admin
         # edits in models.json are picked up live here.
@@ -1757,6 +1817,7 @@ class Bot:
         spin = [0]
         steps = [0]
         last_text = [""]
+        max_stage = [-1]  # furthest APK-pipeline stage reached (-1 = none yet)
 
         def render(phase: str, detail: str = "", *, force: bool = False) -> None:
             if status_msg_id is None:
@@ -1768,6 +1829,14 @@ class Bot:
             spin[0] += 1
             elapsed = int(now - start_ts)
             lines = [f"{frame} *{phase}*"]
+            # Real % progress bar once we're inside the APK pipeline.
+            if max_stage[0] >= 0:
+                total = len(_PIPELINE_STAGES)
+                done = max_stage[0] + 1
+                pct = int(round(done / total * 100))
+                stage_name = _PIPELINE_STAGES[max_stage[0]][0]
+                lines.append(f"`{_progress_bar(pct)}` {pct}%")
+                lines.append(f"📍 {stage_name} ({done}/{total})")
             if detail:
                 lines.append(f"`{detail[:120]}`")
             lines.append(f"🧩 langkah {steps[0]} · ⏱️ {elapsed}s")
@@ -1792,6 +1861,9 @@ class Bot:
             elif kind == "tool_start":
                 steps[0] += 1
                 name = payload.get("name", "tool")
+                st = _stage_index(name)
+                if st > max_stage[0]:
+                    max_stage[0] = st
                 render(_phase_label(name), force=True)
             elif kind == "tool_end":
                 name = payload.get("name", "tool")
@@ -1811,6 +1883,7 @@ class Bot:
                     session,
                     user_message=text,
                     on_event=on_event,
+                    images=[str(p) for p in (images or [])],
                 )
             except APIError as e:
                 final_text = f"API error: {e}"
@@ -1884,6 +1957,9 @@ class Bot:
 # (decompiled smali/java, resources, modified images, class files, logs) is
 # intermediate and must be handed over explicitly via the `deliver` tool.
 _FINAL_ARTIFACT_EXTS = {".apk", ".aab", ".apks", ".xapk"}
+
+# Image uploads forwarded to the model as vision input (see runner.run_turn).
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
 
 def _snapshot_files(root: Path) -> dict[Path, float]:
