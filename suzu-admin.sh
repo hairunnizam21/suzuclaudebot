@@ -393,6 +393,50 @@ action_update_repo() {
   press_enter
 }
 
+action_self_update() {
+  c_bld "=== Self-Update — tarik versi terbaru dari GitHub ==="
+  local repo branch tmp rev bk
+  repo="${SUZU_PANEL_REPO:-https://github.com/hairunnizam21/suzuclaudebot.git}"
+  branch="${SUZU_PANEL_BRANCH:-setup}"
+  echo "  Source : $repo (branch $branch)"
+  echo "  Target : $PANEL_DIR"
+  echo "  .env, model profiles, toolchain & data sesi DIKEKALKAN."
+  read -rp "Proceed? [y/N]: " ok
+  case "$ok" in y|Y|yes|YES) ;; *) echo "Cancelled."; press_enter; return ;; esac
+  tmp="$(mktemp -d)"
+  c_cyn "  Cloning latest…"
+  if ! git clone --depth 1 -b "$branch" "$repo" "$tmp/src" >/dev/null 2>&1; then
+    c_red "  Clone failed (branch/repo/network?)."; rm -rf "$tmp"; press_enter; return
+  fi
+  rev="$(cd "$tmp/src" && git rev-parse --short HEAD 2>/dev/null || echo '?')"
+  c_cyn "  Latest commit: $rev — validating…"
+  if ! ( cd "$tmp/src" && python3 -m py_compile chat_ai/*.py ) 2>/dev/null; then
+    c_red "  New code failed to compile; aborting (no changes applied)."; rm -rf "$tmp"; press_enter; return
+  fi
+  bk="${PANEL_DIR}.bak.$(date +%s)"
+  cp -a "$PANEL_DIR" "$bk" 2>/dev/null && c_cyn "  Backup: $bk"
+  cp -a "$tmp/src/chat_ai/." "$PANEL_DIR/chat_ai/"
+  [ -d "$tmp/src/bin" ] && cp -a "$tmp/src/bin/." "$PANEL_DIR/bin/" 2>/dev/null || true
+  cp -a "$tmp/src/suzu-admin.sh" "$PANEL_DIR/suzu-admin.sh"
+  cp -a "$tmp/src/install.sh" "$PANEL_DIR/install.sh" 2>/dev/null || true
+  [ -d "$tmp/src/systemd" ] && cp -a "$tmp/src/systemd/." "$PANEL_DIR/systemd/" 2>/dev/null || true
+  chmod +x "$PANEL_DIR/suzu-admin.sh" 2>/dev/null || true
+  chmod +x "$PANEL_DIR"/bin/* 2>/dev/null || true
+  rm -rf "$tmp"
+  if systemctl restart suzu-telegram-bot.service 2>/dev/null; then
+    sleep 2
+    if systemctl is-active --quiet suzu-telegram-bot.service; then
+      c_grn "  Updated to $rev and bot restarted (active)."
+    else
+      c_yel "  Updated to $rev but bot not active — check: journalctl -u suzu-telegram-bot -n 30"
+    fi
+  else
+    c_yel "  Updated to $rev (bot service not restarted; start manually)."
+  fi
+  c_yel "  Nota: untuk refresh toolchain/login-hook penuh, jalankan install.sh semula."
+  press_enter
+}
+
 action_view_env() {
   c_bld "=== Current .env (secrets masked) ==="
   awk -F= '{
@@ -891,7 +935,7 @@ action_service_backup_menu() {
     c_bld "  ── Service & Backup ──"
     echo "   1) Restart service (pm2 restart)"
     echo "   2) View live logs"
-    echo "   3) git pull + rebuild + restart"
+    echo "   3) Self-Update (tarik versi terbaru dari GitHub)"
     echo "   4) View current .env"
     echo "   5) Admin token (show / regenerate)"
     echo "   6) Export backup (zip)"
@@ -902,7 +946,7 @@ action_service_backup_menu() {
     case "$u" in
       1) action_restart ;;
       2) action_logs ;;
-      3) action_update_repo ;;
+      3) action_self_update ;;
       4) action_view_env ;;
       5) action_admin_token ;;
       6) action_backup ;;
@@ -922,7 +966,8 @@ show_menu() {
   echo "  3) Telegram Bot      — users, service, settings"
   echo "  4) Model Manager     — tambah banyak model (Claude, Deepseek, GPT…), set default"
   echo "  5) Users & Premium   — limits, donor premium"
-  echo "  6) Service & Backup  — restart, logs, update, env, admin token, backup"
+  echo "  6) Service & Backup  — restart, logs, env, admin token, backup"
+  echo "  7) Self-Update       — tarik versi terbaru skrip dari GitHub"
   echo
   echo "  0) Exit to shell"
   echo
@@ -942,6 +987,7 @@ main() {
       4) action_models_menu ;;
       5) action_users_premium_menu ;;
       6) action_service_backup_menu ;;
+      7) action_self_update ;;
       0|q|Q|exit) c_grn "Bye."; exit 0 ;;
       "") : ;;
       *) c_red "Invalid choice."; sleep 1 ;;
