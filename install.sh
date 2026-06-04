@@ -85,7 +85,9 @@ fi
 # Manual installs for RE tools that are no longer in Ubuntu repos (22.04+).
 # Each block is idempotent — re-running install.sh just refreshes paths.
 # -----------------------------------------------------------------------------
-TOOLS_DIR="$PANEL_DIR/tools"
+# Keep RE tools OUTSIDE $PANEL_DIR: in curl|bash mode the panel dir is later
+# `rm -rf`'d and re-cloned, which would wipe anything we install under it.
+TOOLS_DIR="${SUZU_TOOLS_DIR:-/opt/suzu-tools}"
 mkdir -p "$TOOLS_DIR"
 
 install_apktool() {
