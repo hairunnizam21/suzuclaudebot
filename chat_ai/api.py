@@ -77,10 +77,21 @@ class ChatClient:
         url = f"{self.base_url}{path}"
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
+        # For streaming, use a shorter timeout for the initial connection +
+        # first byte so a hanging model provider fails fast (~45s) instead of
+        # blocking the user for the full self.timeout (often 600s).
+        connect_timeout = min(self.timeout, 45.0) if stream else self.timeout
         last_err: Exception | None = None
         for attempt in range(3):
             try:
-                return urllib.request.urlopen(req, timeout=self.timeout)
+                resp = urllib.request.urlopen(req, timeout=connect_timeout)
+                if stream:
+                    # Once connected, allow long reads (tool calls etc.).
+                    try:
+                        resp.fp.raw._sock.settimeout(self.timeout)  # type: ignore[union-attr]
+                    except (AttributeError, OSError):
+                        pass
+                return resp
             except urllib.error.HTTPError as e:
                 # 4xx is not retryable.
                 body = ""
