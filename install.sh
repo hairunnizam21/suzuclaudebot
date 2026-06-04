@@ -430,17 +430,30 @@ if [ "$INSTALL_BOT" = "1" ] && [ -f "$PANEL_DIR/systemd/suzu-telegram-bot.servic
   fi
 fi
 
-# Optional bashrc hook so admin menu auto-launches on SSH login
+# Login hook: export env + auto-open the admin TUI on interactive SSH login.
 BASHRC_HOOK_FILE="/etc/profile.d/suzu-admin-banner.sh"
 cat > "$BASHRC_HOOK_FILE" <<EOH
-# Suzu AI admin banner
-if [ -t 1 ] && [ -z "\${SUZU_NO_ADMIN_BANNER:-}" ] && [ "\$(id -u)" -eq 0 ]; then
-  printf "\n\033[36m=== Suzu AI VPS ===\033[0m\n"
-  printf "Type \033[1msuzu-admin\033[0m to open the admin menu (option 19 = Chat AI).\n"
-  printf "Or run \033[1msuzu-chat-ai\033[0m to jump straight into the AI assistant.\n\n"
-fi
+# Suzu AI — environment for suzu-admin / suzu-chat-ai / suzu-telegram-bot
 export SUZU_ENV_FILE=$ENV_FILE
 export SUZU_PANEL_DIR=$PANEL_DIR
+
+# Auto-launch the admin menu ("ClaudeSuzubot" UI) on interactive root login.
+# Choose "0) Exit to shell" inside the menu to drop to a normal prompt.
+# Opt out permanently: export SUZU_NO_AUTOLAUNCH=1 (banner only), or
+# SUZU_NO_ADMIN_BANNER=1 to silence everything.
+case "\$-" in
+  *i*)
+    if [ -t 1 ] && [ "\$(id -u)" -eq 0 ] \\
+       && [ -z "\${SUZU_ADMIN_ACTIVE:-}" ] \\
+       && [ -z "\${SUZU_NO_AUTOLAUNCH:-}" ] \\
+       && command -v suzu-admin >/dev/null 2>&1; then
+      SUZU_ADMIN_ACTIVE=1 suzu-admin
+    elif [ -t 1 ] && [ -z "\${SUZU_NO_ADMIN_BANNER:-}" ]; then
+      printf "\n\033[36m=== Suzu AI VPS ===\033[0m\n"
+      printf "Type \033[1msuzu-admin\033[0m to open the admin menu.\n\n"
+    fi
+    ;;
+esac
 EOH
 chmod +x "$BASHRC_HOOK_FILE"
 
