@@ -29,6 +29,7 @@ class Session:
     workspace: str
     model: str
     messages: list[dict[str, Any]] = field(default_factory=list)
+    profile: str = ""
     project: dict[str, Any] = field(default_factory=dict)
     version: int = SESSION_VERSION
 
@@ -61,6 +62,7 @@ class Session:
             workspace=data["workspace"],
             model=data.get("model", ""),
             messages=list(data.get("messages", [])),
+            profile=str(data.get("profile", "")),
             project=dict(data.get("project", {})),
             version=int(data.get("version", SESSION_VERSION)),
         )

@@ -714,6 +714,64 @@ action_telegram_bot() {
   done
 }
 
+# Run the Python model-registry CLI with the right env so it reads/writes the
+# SAME models.json the Telegram bot uses (state dir comes from the env file).
+_models_py() {
+  SUZU_ENV_FILE="$ENV_FILE" PYTHONPATH="$PANEL_DIR" python3 -m chat_ai.models_registry "$@"
+}
+
+# ── Model Manager ─────────────────────────────────────────────────────────── #
+# Add/list/remove multiple model providers. Each profile = name | base URL |
+# model id | API key. The Telegram bot syncs live and lets users pick via
+# /models, so admins can offer Claude, Deepseek, GPT, etc. side by side.
+action_models_menu() {
+  while :; do
+    clear
+    print_header
+    echo
+    c_bld "  ── Model Manager ──"
+    echo "  (profil ditanda * = default. Bot sync automatik; user pilih via /models)"
+    echo
+    _models_py list 2>/dev/null || c_yel "  (cannot read registry yet)"
+    echo
+    c_bld "  Actions:"
+    echo "   1) Add / update model (name, base URL, model id, api key)"
+    echo "   2) Set default model"
+    echo "   3) Remove model"
+    echo "   4) Refresh list"
+    echo
+    echo "   0) Back"
+    read -rp "Choice: " mc; mc="$(_sanitize "$mc")"
+    case "$mc" in
+      1)
+        echo
+        read -rp "Name (cth: Claude 4.8 Opus): " m_name; [ -z "$m_name" ] && continue
+        read -rp "Base URL (cth: http://103.200.216.137:3000/v1): " m_url; [ -z "$m_url" ] && continue
+        read -rp "Model id (cth: claude-opus-4-8): " m_model; [ -z "$m_model" ] && continue
+        read -rp "API key: " m_key
+        if _models_py add --name "$m_name" --base-url "$m_url" --model "$m_model" --api-key "$m_key"; then
+          c_grn "  Saved. Bot akan sync automatik (user nampak di /models)."
+        else
+          c_red "  Failed to save."
+        fi
+        press_enter ;;
+      2)
+        echo
+        read -rp "Name model jadi default: " m_name; [ -z "$m_name" ] && continue
+        _models_py set-default --name "$m_name" || c_red "  not found"
+        press_enter ;;
+      3)
+        echo
+        read -rp "Name model nak buang: " m_name; [ -z "$m_name" ] && continue
+        _models_py remove --name "$m_name" || c_red "  not found"
+        press_enter ;;
+      4) : ;;
+      0|q|Q|"") return ;;
+      *) c_red "Invalid choice."; sleep 0.5 ;;
+    esac
+  done
+}
+
 action_admin_token() {
   c_bld "=== Admin token (for APK admin panel) ==="
   local cur
@@ -761,7 +819,7 @@ _model_label() {
 
 print_header() {
   c_cyn "════════════════════════════════════════════"
-  c_bld "                  SUZU AI"
+  c_bld "               ClaudeSuzuBot"
   c_grn "                  $(_model_label)"
   c_cyn "════════════════════════════════════════════"
   printf "  Domain : %s\n" "$(env_get SUZU_DOMAIN)"
@@ -862,8 +920,9 @@ show_menu() {
   echo "  1) Update            — domain, base URL, API key, model, token limit"
   echo "  2) Chat AI           — decompile / recompile / build APK, reverse engineering"
   echo "  3) Telegram Bot      — users, service, settings"
-  echo "  4) Users & Premium   — limits, donor premium"
-  echo "  5) Service & Backup  — restart, logs, update, env, admin token, backup"
+  echo "  4) Model Manager     — tambah banyak model (Claude, Deepseek, GPT…), set default"
+  echo "  5) Users & Premium   — limits, donor premium"
+  echo "  6) Service & Backup  — restart, logs, update, env, admin token, backup"
   echo
   echo "  0) Exit to shell"
   echo
@@ -880,8 +939,9 @@ main() {
       1) action_update_menu ;;
       2) action_chat_ai ;;
       3) action_telegram_bot ;;
-      4) action_users_premium_menu ;;
-      5) action_service_backup_menu ;;
+      4) action_models_menu ;;
+      5) action_users_premium_menu ;;
+      6) action_service_backup_menu ;;
       0|q|Q|exit) c_grn "Bye."; exit 0 ;;
       "") : ;;
       *) c_red "Invalid choice."; sleep 1 ;;

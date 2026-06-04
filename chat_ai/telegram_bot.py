@@ -56,6 +56,7 @@ from .config import Config
 from .context import strip_hallucinated_protocols
 from .prompts import render_system_prompt
 from .runner import run_turn, summarize_tool_output
+from .models_registry import ModelProfile, ModelRegistry
 from .state import Session, list_sessions
 from .tools import ToolContext, build_default_registry
 
@@ -777,6 +778,21 @@ class Bot:
             seed_admins=bot_cfg.admin_user_ids,
         )
         self.client = ChatClient(cfg.api_base_url, cfg.api_key, timeout=cfg.request_timeout)
+        # Multi-provider model registry (shared with the suzu-admin TUI via
+        # <state_dir>/models.json). Seeded from the .env on first run so the
+        # bot always has at least one usable profile.
+        self.models = ModelRegistry.load(
+            cfg.state_dir,
+            seed=ModelProfile(
+                name=cfg.default_model,
+                base_url=cfg.api_base_url,
+                model=cfg.default_model,
+                api_key=cfg.api_key,
+            ),
+        )
+        # Cache one ChatClient per (base_url, api_key) so switching models is
+        # cheap and connection settings are reused.
+        self._clients: dict[tuple[str, str], ChatClient] = {}
         self.workers = ChatWorkers()
         # Files a user uploaded but hasn't yet told us what to do with. Keyed by
         # chat id; the per-chat worker is the only writer/reader, so no lock.
@@ -1066,6 +1082,9 @@ class Bot:
         if head in ("/clear", "/reset"):
             self._cmd_clear(chat_id)
             return True
+        if head == "/models":
+            self._cmd_models(chat_id)
+            return True
         if head == "/model":
             self._cmd_model(chat_id, rest)
             return True
@@ -1132,7 +1151,8 @@ class Bot:
             "      tak pernah cakap — history mungkin tercemar)\n"
             "  /sessions — list session\n"
             "  /workspace — print path workspace\n"
-            "  /model NAME — tukar model\n"
+            "  /models — senarai model, pilih dgn butang\n"
+            "  /model NAME — tukar model terus\n"
             "  /whoami — Telegram id awak"
         )
         if is_admin:
@@ -1158,6 +1178,7 @@ class Bot:
                     {"text": "📂 Sessions", "callback_data": "menu:sessions"},
                 ],
                 [
+                    {"text": "🧠 Pilih Model", "callback_data": "menu:models"},
                     {"text": "❓ Help", "callback_data": "menu:help"},
                 ],
             ]
@@ -1186,8 +1207,16 @@ class Bot:
             mark = "✅" if p else "❌"
             lines.append(f"{mark} `{t}` → `{p or 'MISSING'}`")
         lines.append("")
-        lines.append(f"Model     : `{self.cfg.default_model}`")
-        lines.append(f"API base  : `{self.cfg.api_base_url}`")
+        self.models.reload_if_changed()
+        session = self.binding.session_for(chat_id, model=self.cfg.default_model)
+        cur = self._resolve_profile(session)
+        if cur is not None:
+            lines.append(f"Model     : `{cur.model}`  ({cur.name})")
+            lines.append(f"API base  : `{cur.base_url}`")
+        else:
+            lines.append(f"Model     : `{self.cfg.default_model}`")
+            lines.append(f"API base  : `{self.cfg.api_base_url}`")
+        lines.append(f"Profiles  : {len(self.models.list())} (guna /models)")
         lines.append(f"Workspace : `{self.cfg.workspaces_dir}`")
         self.api.send_message(chat_id, "\n".join(lines), parse_mode="Markdown")
 
@@ -1245,12 +1274,64 @@ class Bot:
 
     def _cmd_model(self, chat_id: int, rest: str) -> None:
         session = self.binding.session_for(chat_id, model=self.cfg.default_model)
+        self.models.reload_if_changed()
         if not rest:
-            self.api.send_message(chat_id, f"current model: `{session.model}`", parse_mode="Markdown")
+            cur = self._resolve_profile(session)
+            label = cur.name if cur else session.model
+            self.api.send_message(
+                chat_id,
+                f"Model semasa: *{label}*\n`{session.model}`\n\n"
+                "Guna /models untuk pilih dari senarai.",
+                parse_mode="Markdown",
+            )
             return
-        session.model = rest.split()[0]
+        arg = rest.strip()
+        prof = self.models.get(arg)
+        if prof is not None:
+            session.profile = prof.name
+            session.model = prof.model
+            session.save(self.cfg.sessions_dir)
+            self.api.send_message(
+                chat_id, f"✅ Model ditukar: *{prof.name}* (`{prof.model}`)",
+                parse_mode="Markdown",
+            )
+            return
+        # Legacy: treat the argument as a raw model id on the current endpoint.
+        session.model = arg.split()[0]
         session.save(self.cfg.sessions_dir)
-        self.api.send_message(chat_id, f"✅ model: `{session.model}`", parse_mode="Markdown")
+        self.api.send_message(
+            chat_id,
+            f"✅ model id: `{session.model}`\n"
+            "(tiada profil dengan nama itu — guna /models untuk senarai)",
+            parse_mode="Markdown",
+        )
+
+    def _cmd_models(self, chat_id: int) -> None:
+        session = self.binding.session_for(chat_id, model=self.cfg.default_model)
+        self.models.reload_if_changed()
+        profs = self.models.list()
+        if not profs:
+            self.api.send_message(
+                chat_id,
+                "Belum ada model. Admin boleh tambah di server: "
+                "`suzu-admin` → *Model Manager*.",
+                parse_mode="Markdown",
+            )
+            return
+        current = self._resolve_profile(session)
+        cur_name = current.name if current else ""
+        lines = ["*Pilih model:*", ""]
+        rows: list[list[dict[str, str]]] = []
+        for p in profs:
+            mark = "🟢" if p.name == cur_name else "⚪"
+            lines.append(f"{mark} *{p.name}* — `{p.model}`")
+            rows.append([{"text": f"{mark} {p.name}", "callback_data": f"model:set:{p.key}"}])
+        self.api.send_message(
+            chat_id,
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup={"inline_keyboard": rows},
+        )
 
     # -- admin commands ---------------------------------------------------- #
 
@@ -1396,10 +1477,37 @@ class Bot:
                 self._cmd_sessions(chat_id)
             elif action == "help":
                 self._cmd_help(chat_id, is_admin=is_admin)
+            elif action == "models":
+                self._cmd_models(chat_id)
             elif action == "users" and is_admin:
                 self._cmd_admin_users(chat_id)
             elif action == "pending" and is_admin:
                 self._cmd_admin_pending(chat_id)
+            return
+
+        # Model picker (available to all approved users).
+        if data.startswith("model:set:"):
+            if not self.users.is_approved(uid):
+                self.api.answer_callback_query(qid, text="Tak dibenarkan.", show_alert=True)
+                return
+            key = data.split(":", 2)[2]
+            self.models.reload_if_changed()
+            prof = self.models.get(key)
+            if prof is None:
+                self.api.answer_callback_query(qid, text="Model tak dijumpai", show_alert=True)
+                return
+            session = self.binding.session_for(chat_id, model=self.cfg.default_model)
+            session.profile = prof.name
+            session.model = prof.model
+            session.save(self.cfg.sessions_dir)
+            self.api.answer_callback_query(qid, text=f"✅ {prof.name}")
+            if msg_id:
+                self.api.edit_message_text(
+                    chat_id, msg_id,
+                    f"✅ Model ditukar: *{prof.name}*\n`{prof.model}`",
+                    parse_mode="Markdown",
+                    reply_markup={"inline_keyboard": []},
+                )
             return
 
         # "What to do with this APK?" picker (available to all approved users).
@@ -1587,6 +1695,33 @@ class Bot:
 
     # -- agent routing ----------------------------------------------------- #
 
+    # -- model profiles ---------------------------------------------------- #
+
+    def _client_for(self, profile: ModelProfile) -> ChatClient:
+        """Return a cached ChatClient for this profile's endpoint/key."""
+        key = (profile.base_url, profile.api_key)
+        client = self._clients.get(key)
+        if client is None:
+            client = ChatClient(
+                profile.base_url or self.cfg.api_base_url,
+                profile.api_key or self.cfg.api_key,
+                timeout=self.cfg.request_timeout,
+            )
+            self._clients[key] = client
+        return client
+
+    def _resolve_profile(self, session: Session) -> Optional[ModelProfile]:
+        """Pick the model profile for this session, honouring live edits.
+
+        Order: the session's chosen profile -> registry default -> None
+        (caller then falls back to the env-configured default client).
+        """
+        self.models.reload_if_changed()
+        prof = self.models.get(session.profile) if session.profile else None
+        if prof is None:
+            prof = self.models.default_profile()
+        return prof
+
     def _route_to_agent(
         self,
         chat_id: int,
@@ -1595,6 +1730,17 @@ class Bot:
         *,
         reply_to: Optional[int] = None,
     ) -> None:
+        # Resolve which model/provider this chat should use right now. Admin
+        # edits in models.json are picked up live here.
+        profile = self._resolve_profile(session)
+        if profile is not None:
+            client = self._client_for(profile)
+            if session.model != profile.model or session.profile != profile.name:
+                session.model = profile.model
+                session.profile = profile.name
+                session.save(self.cfg.sessions_dir)
+        else:
+            client = self.client
         # Initial status message we'll keep editing into a small live "card".
         start_ts = time.time()
         try:
@@ -1658,7 +1804,7 @@ class Bot:
         with TypingPing(self.api, chat_id):
             try:
                 final_text = run_turn(
-                    self.client,
+                    client,
                     self.registry,
                     ctx,
                     self.cfg,
