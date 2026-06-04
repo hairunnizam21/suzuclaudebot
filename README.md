@@ -1,29 +1,71 @@
-# Suzu AI — VPS panel + terminal AI assistant
+# Suzu AI — Telegram bot + VPS panel + terminal AI assistant
 
-`script_ai_panel` provisions a fresh Ubuntu VPS with:
+`suzuclaudebot` provisions a fresh Ubuntu VPS with:
 
+- A **Telegram bot** (`suzu-telegram-bot`) — chat with the AI and do real APK
+  work straight from your phone: send an `.apk`, ask it to decompile / patch /
+  recompile / sign, get the new APK back. Pick which AI model to use with
+  `/models`.
 - A **terminal chat AI** (`suzu-chat-ai`) — like opencode / aider / claude-code,
   but specialised for **APK reverse engineering**: build / decompile / recompile
   APKs of any framework (Java, Kotlin, Native, Flutter, React Native, Unity,
   Xamarin, …), patch resources, sign APKs, run general RE workflows.
-- An interactive **admin TUI** (`suzu-admin`) — manage env, users, premium
-  plans, backups, *and* jump into the chat AI from menu option **19**.
+- An interactive **admin TUI** (`suzu-admin`, the *ClaudeSuzuBot* menu) — auto-
+  launches on SSH login; manage env, users, a multi-provider **Model Manager**,
+  backups, **Self-Update** from GitHub, *and* jump into the chat AI.
 - (Optional) the legacy [suzu-ai-web](https://github.com/hairunnizam21/suzu-ai-web)
   frontend if you set `SUZU_INSTALL_WEB=1`.
 
-## Install (fresh Ubuntu VPS)
+## Install (fresh Ubuntu VPS) — all-in-one, one command
+
+The installer is **all-in-one**: a single command installs every tool (JDK,
+apktool, aapt/aapt2, jadx, dex2jar, smali/baksmali, zipalign, apksigner), the
+Telegram bot, the admin TUI, and a 24/7 systemd service. It enables the
+`universe` apt repo automatically, installs packages with per-package fallback
+(one bad package never aborts the rest), heals missing tools, and prints a
+✅/❌ verification summary at the end.
+
+### Recommended: non-interactive one-liner (Telegram bot)
+
+Pass your settings as environment variables so there are no prompts:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hairunnizam21/script_ai_panel/setup/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/hairunnizam21/suzuclaudebot/setup/install.sh | sudo -E env \
+  TELEGRAM_BOT_TOKEN='123456:your-bot-token' \
+  TELEGRAM_ALLOWED_USER_IDS='5547807879' \
+  AI_API_BASE_URL='http://103.200.216.137:3000/v1' \
+  AI_API_KEY='your_api_key' \
+  AI_DEFAULT_MODEL='claude-sonnet-4-6' \
+  bash
 ```
 
-You will be prompted for:
+- `TELEGRAM_BOT_TOKEN` — from [@BotFather](https://t.me/BotFather) (`/newbot`).
+- `TELEGRAM_ALLOWED_USER_IDS` — comma-separated admin Telegram id(s). Other
+  users who `/start` go to *pending* until an admin approves them.
+- `AI_API_BASE_URL` / `AI_API_KEY` / `AI_DEFAULT_MODEL` — your OpenAI-compatible
+  endpoint. (You can add more providers later via the Model Manager.)
 
-- Public domain (only used when `SUZU_INSTALL_WEB=1`)
-- AI base URL (default `https://core.fiqstr.com/v1`)
-- AI API key (OpenAI-compatible)
-- Default model
-- Firebase project ID (only used when `SUZU_INSTALL_WEB=1`)
+### Alternative: git clone (works even if the repo is private)
+
+```bash
+git clone -b setup https://github.com/hairunnizam21/suzuclaudebot.git /opt/suzu-src
+cd /opt/suzu-src
+sudo -E env \
+  TELEGRAM_BOT_TOKEN='123456:your-bot-token' \
+  TELEGRAM_ALLOWED_USER_IDS='5547807879' \
+  AI_API_BASE_URL='http://103.200.216.137:3000/v1' \
+  AI_API_KEY='your_api_key' \
+  bash install.sh
+```
+
+### After install
+
+1. Telegram → open your bot → `/start` (you're admin if your id is in
+   `TELEGRAM_ALLOWED_USER_IDS`). Use `/models` to pick a model.
+2. SSH into the server → the **ClaudeSuzuBot** menu auto-launches → **Model
+   Manager** to add more providers (Claude / Deepseek / GPT …), **Self-Update**
+   to pull the latest scripts from GitHub. Choose `0) Exit to shell` for a
+   normal prompt (or `export SUZU_NO_AUTOLAUNCH=1`).
 
 What you get:
 
@@ -137,11 +179,16 @@ The menu lets you:
 The default daily limit is **2,000,000 tokens per user**, reset at UTC
 midnight. Per-user limits override the default for a given user only.
 
-## Re-installing on a new VPS
+## Re-installing / new VPS / updating
 
 When your VPS expires or you migrate, spin up a new Ubuntu box and run the
-one-liner above.  The installer is idempotent — re-running it on an existing
-install just updates the panel scripts in place.
+one-liner above. The installer is idempotent — re-running it on an existing
+install just refreshes the panel scripts and re-verifies the toolchain, while
+preserving your `.env`, model profiles, keystore and session data.
+
+To update an existing server in place without re-running the installer, open
+`suzu-admin` → **Self-Update** (pulls the latest scripts from GitHub and
+restarts the bot).
 
 ## Files
 
