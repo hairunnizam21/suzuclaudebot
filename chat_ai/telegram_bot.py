@@ -1952,7 +1952,14 @@ class Bot:
                 final_text = f"Internal error: {e}"
 
         # Replace the status message with the first chunk of the answer.
-        chunks = list(_chunk_message(final_text or "(empty response)"))
+        if not final_text or not final_text.strip():
+            profile = self._resolve_profile(session)
+            mname = profile.name if profile else session.model
+            final_text = (
+                f"⚠️ Model *{mname}* tak respon (empty/timeout). "
+                "Cuba lagi atau tukar model: /models"
+            )
+        chunks = list(_chunk_message(final_text))
         first = chunks[0]
         try:
             if status_msg_id is not None:
