@@ -88,6 +88,34 @@ fi
 TOOLS_DIR="$PANEL_DIR/tools"
 mkdir -p "$TOOLS_DIR"
 
+install_apktool() {
+  # The apt apktool on Ubuntu 22.04 is 2.5.x and fails to rebuild many modern
+  # APKs (Material You / aapt2 issues). Prefer a recent upstream jar and shadow
+  # the apt binary via /usr/local/bin (which precedes /usr/bin on PATH). If the
+  # download fails we keep whatever apt installed.
+  c_bld "==> Installing apktool (iBotPeaches/Apktool)"
+  local ver url
+  ver="${SUZU_APKTOOL_VER:-}"
+  if [ -z "$ver" ]; then
+    ver="$(curl -fsSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest 2>/dev/null \
+      | grep -oE '"tag_name": "v[0-9.]+"' | head -1 | grep -oE '[0-9.]+')" || true
+  fi
+  [ -z "$ver" ] && ver="3.0.2"
+  url="https://github.com/iBotPeaches/Apktool/releases/download/v${ver}/apktool_${ver}.jar"
+  mkdir -p "$TOOLS_DIR/apktool"
+  if curl -fsSL -o "$TOOLS_DIR/apktool/apktool.jar" "$url"; then
+    cat > /usr/local/bin/apktool <<EOF
+#!/usr/bin/env bash
+exec java -jar "$TOOLS_DIR/apktool/apktool.jar" "\$@"
+EOF
+    chmod +x /usr/local/bin/apktool
+    hash -r
+    c_grn "  apktool -> $(apktool --version 2>&1 | head -1)"
+  else
+    c_yel "  could not fetch apktool $ver upstream — using apt version: $(command -v apktool || echo none)"
+  fi
+}
+
 install_jadx() {
   if command -v jadx >/dev/null 2>&1; then
     c_yel "  jadx already installed: $(command -v jadx)"
@@ -95,12 +123,14 @@ install_jadx() {
   fi
   c_bld "==> Installing jadx (skylot/jadx)"
   local url
-  url="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest \
+  url="$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest 2>/dev/null \
     | grep -oE '"browser_download_url": "[^"]*jadx-[0-9][^"]*\.zip"' \
-    | grep -v 'gui' | head -1 | cut -d'"' -f4)"
+    | grep -v 'gui' | head -1 | cut -d'"' -f4)" || true
   if [ -z "$url" ]; then
-    c_yel "  could not determine jadx release URL — skipping"
-    return
+    # GitHub API rate-limited / offline — fall back to a known-good release.
+    local jver="${SUZU_JADX_VER:-1.5.1}"
+    url="https://github.com/skylot/jadx/releases/download/v${jver}/jadx-${jver}.zip"
+    c_yel "  GitHub API unavailable — using pinned jadx ${jver}"
   fi
   rm -rf "$TOOLS_DIR/jadx"
   mkdir -p "$TOOLS_DIR/jadx"
@@ -120,11 +150,13 @@ install_dex2jar() {
   fi
   c_bld "==> Installing dex2jar (pxb1988/dex2jar)"
   local url
-  url="$(curl -fsSL https://api.github.com/repos/pxb1988/dex2jar/releases/latest \
-    | grep -oE '"browser_download_url": "[^"]*\.zip"' | head -1 | cut -d'"' -f4)"
+  url="$(curl -fsSL https://api.github.com/repos/pxb1988/dex2jar/releases/latest 2>/dev/null \
+    | grep -oE '"browser_download_url": "[^"]*\.zip"' | head -1 | cut -d'"' -f4)" || true
   if [ -z "$url" ]; then
-    c_yel "  could not determine dex2jar release URL — skipping"
-    return
+    # GitHub API rate-limited / offline — fall back to a known-good release.
+    local dver="${SUZU_DEX2JAR_VER:-2.4}"
+    url="https://github.com/pxb1988/dex2jar/releases/download/v${dver}/dex-tools-v${dver}.zip"
+    c_yel "  GitHub API unavailable — using pinned dex2jar ${dver}"
   fi
   rm -rf "$TOOLS_DIR/dex2jar"
   mkdir -p "$TOOLS_DIR/dex2jar"
@@ -173,9 +205,13 @@ EOF
   c_grn "  smali    -> $(smali --version 2>&1 | head -1)"
 }
 
-install_jadx
-install_dex2jar
-install_smali
+# These upstream fetches are best-effort: a transient GitHub API rate-limit or
+# network blip must not abort the whole install (set -e). Guarding each call
+# with `|| ...` disables errexit for the function body, so a failure just warns.
+install_apktool || c_yel "  apktool upgrade skipped (non-fatal)"
+install_jadx    || c_yel "  jadx install skipped (non-fatal)"
+install_dex2jar || c_yel "  dex2jar install skipped (non-fatal)"
+install_smali   || c_yel "  smali install skipped (non-fatal)"
 
 if [ "$INSTALL_WEB" = "1" ]; then
   if ! command -v node >/dev/null 2>&1 || [ "$(node -v | sed 's/v//;s/\..*//')" -lt "$NODE_MAJOR" ]; then
