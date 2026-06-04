@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Suzu AI — one-shot VPS installer
 # Usage (as root):
-#   curl -fsSL https://raw.githubusercontent.com/hairunnizam21/script_ai_panel/setup/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/hairunnizam21/suzuclaudebot/setup/install.sh | sudo bash
 # or (interactive):
 #   sudo bash install.sh
 #
@@ -382,7 +382,7 @@ if [ -n "$SELF_DIR" ] && [ -d "$SELF_DIR/chat_ai" ]; then
   fi
 else
   # Curl|bash mode: re-clone this very repo into PANEL_DIR.
-  PANEL_REPO="${SUZU_PANEL_REPO:-https://github.com/hairunnizam21/script_ai_panel.git}"
+  PANEL_REPO="${SUZU_PANEL_REPO:-https://github.com/hairunnizam21/suzuclaudebot.git}"
   PANEL_BRANCH="${SUZU_PANEL_BRANCH:-setup}"
   if [ -d "$PANEL_DIR/.git" ]; then
     git -C "$PANEL_DIR" fetch origin "$PANEL_BRANCH"
